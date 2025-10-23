@@ -48,56 +48,67 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - name: Install dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt remove -y '*cloud*' '*firefox*' '*chrome*' '*dotnet*' '*php*'
           sudo apt update -y && sudo apt upgrade -y
           sudo apt install -y build-essential flex bison g++ gawk gettext libncurses-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget clang llvm llvm-dev lld ccache
           sudo apt autoremove -y && sudo apt clean -y
 
-      - name: Verify LLVM installation
+      - name: Some debug info
         run: |
           clang --version || echo "clang not found"
           which clang || echo "clang not found in PATH"
           llvm-config --version || echo "llvm-config not found"
           llc --version || echo "llc not found"
           ccache -s || echo "ccache not found"
-          
-      - name: Setup ccache
-        uses: actions/cache@v3
-        with:
-          path: ${{ github.workspace }}/.ccache
-          key: ${{ runner.os }}-ccache-${{ hashFiles('**/feeds.conf.default') }}
-          restore-keys: |
-            ${{ runner.os }}-ccache-
-
-      - name: Cache OpenWrt downloads
-        uses: actions/cache@v3
-        with:
-          path: openwrt/dl
-          key: ${{ runner.os }}-dl-${{ hashFiles('openwrt/feeds.conf.default') }}
-          restore-keys: |
-            ${{ runner.os }}-dl-
-            
-      - name: Configure ccache
-        run: |
-          ccache --set-config=cache_dir=${{ github.workspace }}/.ccache
-          ccache --set-config=max_size=2G
-          ccache --set-config=compression=true
-          ccache --set-config=compression_level=6
-          ccache -z  # Zero statistics
-        env:
-          CCACHE_DIR: ${{ github.workspace }}/.ccache
 
       - name: Checkout remote repository
         uses: actions/checkout@v4
         with:
           repository: ${{ env.REMOTE_REPOSITORY }}
           ref: ${{ needs.check_commits.outputs.remote_branch }}
+          fetch-depth: 1
 
       - name: Checkout current repository
         uses: actions/checkout@v4
         with:
           path: "builder_repo"
+          fetch-depth: 1
+          
+      - name: Configure ccache
+        run: |
+          ccache --set-config=cache_dir=${{ github.workspace }}/.ccache
+          ccache --set-config=max_size=3G
+          ccache --set-config=compression=true
+          ccache --set-config=compression_level=6
+          ccache -p  # Show current configuration
+          ccache -z  # Zero statistics
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+
+      - name: Setup ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ${{ runner.os }}-ccache-${{ hashFiles('**/feeds.conf.default') }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-
+
+      - name: Show restored ccache size
+        run: |
+          echo "CCACHE_DIR=${{ github.workspace }}/.ccache"
+          du -sh "${{ github.workspace }}/.ccache" || true
+          ccache -s || true
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+
+      - name: Cache OpenWrt downloads
+        uses: actions/cache@v4
+        with:
+          path: ./dl
+          key: ${{ runner.os }}-dl-${{ hashFiles('**/feeds.conf.default') }}
 
       - name: Update and install feeds
         run: |
@@ -109,18 +120,20 @@ jobs:
           CCACHE_DIR: ${{ github.workspace }}/.ccache
           USE_CCACHE: 1
 
-      - name: Setup configuration and custom files
+      - name: Copy configuration and overlay files
         run: |
           mv -v builder_repo/files ./
           sed -i 's|XXXXXX/XXXXXX|${{ github.repository }}|' ./files/usr/bin/upgrade_custom_openwrt || exit 1
           chmod 755 ./files/usr/bin/upgrade_custom_openwrt
           mv -v builder_repo/${{ env.CONFIG_FILE }} .config
           make defconfig
+          echo "### === Checking BPF config ==="
+          grep -E "BPF_TOOLCHAIN|llvm-bpf" .config
         env:
           CCACHE_DIR: ${{ github.workspace }}/.ccache
           USE_CCACHE: 1
 
-      - name: Build firmware
+      - name: Download sources
         run: |
           echo "### Download sources with normal parallelism"
           make download -j1 || {
@@ -128,19 +141,40 @@ jobs:
             sleep 30
             make download -j1 V=s
           }
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          USE_CCACHE: 1
 
-          echo "### build host tools with reduced parallelism"
+      - name: Build host tools
+        run: |
+          echo "### Build host tools with reduced parallelism"
           make tools/install -j2 V=s
-          
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          USE_CCACHE: 1
+
+      - name: Build Go host (golang)
+        run: |
           echo "### Build golang separately with minimal parallelism"
           make package/feeds/packages/golang/host-compile -j1 V=s
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          USE_CCACHE: 1
 
+      - name: Build all target packages and firmware
+        run: |
           echo "### Build all target packages with normal parallelism"
           make -j$(nproc) || {
             echo "Retrying..."
             sleep 30
             make -j1 V=s
           }
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          USE_CCACHE: 1
+
+      - name: Package firmware artifacts
+        run: |
           mkdir -p firmware
           find ./bin -type f \( -iname 'openwrt-*-sysupgrade.bin' -or -iname 'sha256sums' -or -iname 'config.buildinfo' \) -exec mv -v {} ./firmware/ \; ||:
           mv .config firmware/full.config ||:
@@ -149,17 +183,21 @@ jobs:
           USE_CCACHE: 1
 
       - name: Show final ccache statistics
+        if: always()
         run: |
           file gcc || echo "gcc not found"
+          ccache -p
           ccache -s
         env:
           CCACHE_DIR: ${{ github.workspace }}/.ccache
 
       - name: Upload artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gl-mt6000-firmware
           path: firmware/*
+          if-no-files-found: ignore
 
       - name: Create release
         run: |
