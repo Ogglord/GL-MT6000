@@ -52,7 +52,8 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt remove -y '*cloud*' '*firefox*' '*chrome*' '*dotnet*' '*php*'
-          sudo apt update -y && sudo apt upgrade -y
+          sudo apt update -y
+          # sudo apt upgrade -y
           sudo apt install -y build-essential flex bison g++ gawk gettext libncurses-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget clang llvm llvm-dev lld ccache
           sudo apt autoremove -y && sudo apt clean -y
 
