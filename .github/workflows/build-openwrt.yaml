@@ -115,10 +115,16 @@ jobs:
 
       - name: Update and install feeds
         run: |
-          ./scripts/feeds update -a
+          set -Eeo pipefail
+          echo "### Updating feeds (with retry)"
+          ./scripts/feeds update -a || { echo "Update failed. Retrying in 5s..."; sleep 5; ./scripts/feeds update -a; }
+
+          echo "### Installing feeds"
           ./scripts/feeds install -a
-          # run again because sometimes it misses some dependencies
-          ./scripts/feeds install -a
+
+          # Run again because sometimes it misses some dependencies
+          echo "### Re-installing feeds to catch missed deps"
+          ./scripts/feeds install -a 
         env:
           CCACHE_DIR: ${{ github.workspace }}/.ccache
           USE_CCACHE: 1
