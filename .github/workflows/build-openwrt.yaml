@@ -76,7 +76,7 @@ jobs:
         with:
           path: "builder_repo"
           fetch-depth: 1
-          
+
       - name: Configure ccache
         run: |
           ccache --set-config=cache_dir=${{ github.workspace }}/.ccache
@@ -104,11 +104,13 @@ jobs:
         env:
           CCACHE_DIR: ${{ github.workspace }}/.ccache
 
-      - name: Cache OpenWrt downloads
-        uses: actions/cache@v4
+      - name: Restore OpenWrt downloads
+        uses: actions/cache/restore@v4
         with:
           path: ./dl
           key: ${{ runner.os }}-dl-${{ hashFiles('**/feeds.conf.default') }}
+          restore-keys: |
+            ${{ runner.os }}-dl-
 
       - name: Update and install feeds
         run: |
@@ -134,6 +136,7 @@ jobs:
           USE_CCACHE: 1
 
       - name: Download sources
+        id: download_sources
         run: |
           echo "### Download sources with normal parallelism"
           make download -j1 || {
@@ -144,6 +147,13 @@ jobs:
         env:
           CCACHE_DIR: ${{ github.workspace }}/.ccache
           USE_CCACHE: 1
+
+      - name: Save OpenWrt downloads
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ./dl
+          key: ${{ runner.os }}-dl-${{ hashFiles('**/feeds.conf.default') }}
 
       - name: Build host tools
         run: |
