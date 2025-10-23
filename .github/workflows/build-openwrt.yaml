@@ -51,8 +51,42 @@ jobs:
         run: |
           sudo apt remove -y '*cloud*' '*firefox*' '*chrome*' '*dotnet*' '*php*'
           sudo apt update -y && sudo apt upgrade -y
-          sudo apt install -y build-essential clang flex bison g++ gawk gettext libncurses-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget llvm
+          sudo apt install -y build-essential flex bison g++ gawk gettext libncurses-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget clang llvm llvm-dev lld ccache
           sudo apt autoremove -y && sudo apt clean -y
+
+      - name: Verify LLVM installation
+        run: |
+          clang --version || echo "clang not found"
+          which clang || echo "clang not found in PATH"
+          llvm-config --version || echo "llvm-config not found"
+          llc --version || echo "llc not found"
+          ccache -s || echo "ccache not found"
+          
+      - name: Setup ccache
+        uses: actions/cache@v3
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ${{ runner.os }}-ccache-${{ hashFiles('**/feeds.conf.default') }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-
+
+      - name: Cache OpenWrt downloads
+        uses: actions/cache@v3
+        with:
+          path: openwrt/dl
+          key: ${{ runner.os }}-dl-${{ hashFiles('openwrt/feeds.conf.default') }}
+          restore-keys: |
+            ${{ runner.os }}-dl-
+            
+      - name: Configure ccache
+        run: |
+          ccache --set-config=cache_dir=${{ github.workspace }}/.ccache
+          ccache --set-config=max_size=2G
+          ccache --set-config=compression=true
+          ccache --set-config=compression_level=6
+          ccache -z  # Zero statistics
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
 
       - name: Checkout remote repository
         uses: actions/checkout@v4
@@ -71,6 +105,9 @@ jobs:
           ./scripts/feeds install -a
           # run again because sometimes it misses some dependencies
           ./scripts/feeds install -a
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          USE_CCACHE: 1
 
       - name: Setup configuration and custom files
         run: |
@@ -79,14 +116,26 @@ jobs:
           chmod 755 ./files/usr/bin/upgrade_custom_openwrt
           mv -v builder_repo/${{ env.CONFIG_FILE }} .config
           make defconfig
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          USE_CCACHE: 1
 
       - name: Build firmware
         run: |
-          make download -j$(nproc) || {
+          echo "### Download sources with normal parallelism"
+          make download -j1 || {
             echo "Retrying..."
             sleep 30
             make download -j1 V=s
           }
+
+          echo "### build host tools with reduced parallelism"
+          make tools/install -j2 V=s
+          
+          echo "### Build golang separately with minimal parallelism"
+          make package/feeds/packages/golang/host-compile -j1 V=s
+
+          echo "### Build all target packages with normal parallelism"
           make -j$(nproc) || {
             echo "Retrying..."
             sleep 30
@@ -95,6 +144,16 @@ jobs:
           mkdir -p firmware
           find ./bin -type f \( -iname 'openwrt-*-sysupgrade.bin' -or -iname 'sha256sums' -or -iname 'config.buildinfo' \) -exec mv -v {} ./firmware/ \; ||:
           mv .config firmware/full.config ||:
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          USE_CCACHE: 1
+
+      - name: Show final ccache statistics
+        run: |
+          file gcc || echo "gcc not found"
+          ccache -s
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
