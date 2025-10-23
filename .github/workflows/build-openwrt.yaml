@@ -77,17 +77,6 @@ jobs:
           path: "builder_repo"
           fetch-depth: 1
 
-      - name: Configure ccache
-        run: |
-          ccache --set-config=cache_dir=${{ github.workspace }}/.ccache
-          ccache --set-config=max_size=3G
-          ccache --set-config=compression=true
-          ccache --set-config=compression_level=6
-          ccache -p  # Show current configuration
-          ccache -z  # Zero statistics
-        env:
-          CCACHE_DIR: ${{ github.workspace }}/.ccache
-
       - name: Setup ccache
         uses: actions/cache@v4
         with:
@@ -95,6 +84,17 @@ jobs:
           key: ${{ runner.os }}-ccache-${{ hashFiles('**/feeds.conf.default') }}
           restore-keys: |
             ${{ runner.os }}-ccache-
+
+      - name: Configure ccache
+        run: |
+          ccache --set-config=cache_dir=${{ github.workspace }}/.ccache
+          ccache --set-config=max_size=4G
+          ccache --set-config=compression=true
+          ccache --set-config=compression_level=6
+          ccache -p  # Show current configuration
+          ccache -z  # Zero statistics
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
 
       - name: Show restored ccache size
         run: |
@@ -139,7 +139,7 @@ jobs:
         id: download_sources
         run: |
           echo "### Download sources with normal parallelism"
-          make download -j1 || {
+          make download -j2 || {
             echo "Retrying..."
             sleep 30
             make download -j1 V=s
@@ -149,16 +149,24 @@ jobs:
           USE_CCACHE: 1
 
       - name: Save OpenWrt downloads
-        if: always()
+        if: always() || steps.download_sources.outcome != 'skipped'
         uses: actions/cache/save@v4
         with:
           path: ./dl
           key: ${{ runner.os }}-dl-${{ hashFiles('**/feeds.conf.default') }}
+      
+      - name: Check Download size
+        if: always()
+        run: |
+          echo "### ./dl directory size:"
+          du -sh ./dl || true
 
       - name: Build host tools
         run: |
-          echo "### Build host tools with reduced parallelism"
-          make tools/install -j2 V=s
+          set -eo pipefail
+          ts() { while IFS= read -r line; do echo "$(date '+[%H:%M]') $line"; done; }
+          echo "### Build host tools" | ts
+          make tools/install -j$(nproc) 2>&1 | ts
         env:
           CCACHE_DIR: ${{ github.workspace }}/.ccache
           USE_CCACHE: 1
@@ -166,7 +174,10 @@ jobs:
       - name: Build Go host (golang)
         run: |
           echo "### Build golang separately with minimal parallelism"
-          make package/feeds/packages/golang/host-compile -j1 V=s
+          make package/feeds/packages/golang/host/compile -j1 V=s || {
+            echo "Fallback: trying package/golang/host/compile"
+            make package/golang/host/compile -j1 V=s
+          }
         env:
           CCACHE_DIR: ${{ github.workspace }}/.ccache
           USE_CCACHE: 1
@@ -195,7 +206,7 @@ jobs:
       - name: Show final ccache statistics
         if: always()
         run: |
-          file gcc || echo "gcc not found"
+          file staging_dir/host/bin/gcc || echo "staging_dir/host/bin/gcc not found"
           ccache -p
           ccache -s
         env:
